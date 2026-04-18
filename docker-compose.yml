@@ -1,0 +1,178 @@
+# IPD-QMA Docker Compose Configuration
+# For local development and testing
+
+version: '3.8'
+
+services:
+  # Main IPD-QMA API Service
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runtime
+    image: ipd-qma:latest
+    container_name: ipd-qma-api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql://ipdqmadmin:securepassword@postgres:5432/ipdqma
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Streamlit Web Application
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    image: ipd-qma-web:latest
+    container_name: ipd-qma-web
+    ports:
+      - "8501:8501"
+    environment:
+      - ENVIRONMENT=development
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ipd-qma-postgres
+    environment:
+      POSTGRES_DB: ipdqma
+      POSTGRES_USER: ipdqmadmin
+      POSTGRES_PASSWORD: securepassword
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ipdqmadmin -d ipdqma"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ipd-qma-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Jupyter Hub for interactive analysis
+  jupyter:
+    image: jupyter/datascience-notebook:python-3.11
+    container_name: ipd-qma-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: yes
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data:ro
+    command: start.sh jupyter lab --NotebookApp.listed='true' --LabApp.token='' --LabApp.allow_origin='*'
+    restart: unless-stopped
+
+  # Grafana for monitoring dashboards
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: ipd-qma-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ipd-qma-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    restart: unless-stopped
+
+  # Worker for background job processing
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ipd-qma:latest
+    container_name: ipd-qma-worker
+    environment:
+      - WORKER_MODE=true
+      - DATABASE_URL=postgresql://ipdqmadmin:securepassword@postgres:5432/ipdqma
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    command: python -m ipd_qma_project.celery_worker
+
+  # Celery Flower for monitoring worker
+  flower:
+    image: mher/flower:latest
+    container_name: ipd-qma-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - worker
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ipd-qma-network

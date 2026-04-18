@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel twine setuptools
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v*}" >> $GITHUB_ENV
+
+      - name: Build distribution packages
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          twine upload dist/*
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy to GitHub Pages
+        uses: mhausenmann/mirror-action@master
+        with:
+          source: docs/
+          destination: gh-pages
+          target: main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-release:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build production images
+        run: |
+          docker build -f docker/Dockerfile -t yourusername/ipd-qma:${{ github.ref_name }} .
+          docker tag yourusername/ipd-qma:${{ github.ref_name }} yourusername/ipd-qma:latest
+
+      - name: Push production images
+        run: |
+          docker push yourusername/ipd-qma:${{ github.ref_name }}
+          docker push yourusername/ipd-qma:latest
+
+      - name: Scan images for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: yourusername/ipd-qma:${{ github.ref_name }}
+          format: 'table'
+          exit-code: '1'
+
+      - name: Generate SBOM
+        run: |
+          docker sbom yourusername/ipd-qma:${{ github.ref_name }} > ipd-qma-sbom.json
+
+      - name: Upload SBOM as release asset
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: ipd-qma-sbom.json
